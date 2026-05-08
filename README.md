@@ -1,240 +1,206 @@
 # model-provenance
 
-> Audit AI models for supply chain integrity — cryptographic fingerprinting,
-> tamper detection, suspicious file scanning, and structured provenance reports.
+> Audit AI models for supply chain integrity — before they reach production.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Overview
+`model-provenance` is a command-line tool that audits AI models for supply chain integrity. It computes cryptographic fingerprints of model files, checks them against a known-good hash database, scans for tampered weights and malicious payloads, and generates structured provenance reports with licensing and regulatory compliance notes. Supports both Hugging Face Hub models and local model directories.
 
-`model-provenance` is a command-line tool that helps developers and MLOps teams
-verify AI model origin and integrity before production deployment. It:
-
-- **Computes SHA-256 fingerprints** for all model weight and config files.
-- **Compares fingerprints** against a local SQLite database and a bundled YAML
-  seed database of known-good hashes.
-- **Scans for supply chain attack vectors** — pickle exploits, embedded shell
-  scripts, unexpected executables.
-- **Checks licenses** and flags restricted or proprietary licenses with EU AI
-  Act and NIST RMF compliance notes.
-- **Generates structured provenance reports** as Rich terminal tables, JSON, or
-  YAML.
+---
 
 ## Quick Start
 
-### Installation
-
 ```bash
-# From PyPI (once published)
+# Install
 pip install model-provenance
 
-# From source
-git clone https://github.com/example/model-provenance
-cd model-provenance
-pip install -e ".[dev]"
-```
-
-### Usage
-
-#### Verify a Hugging Face Hub model
-
-```bash
-# Basic verification of a Hub model
-model-provenance verify bert-base-uncased
-
-# Verify with a specific revision
-model-provenance verify bert-base-uncased --revision main
-
-# Verify and output JSON report
-model-provenance verify gpt2 --format json
-
-# Verify and save YAML report to file
-model-provenance verify gpt2 --format yaml --output report.yaml
-```
-
-#### Verify a local model directory
-
-```bash
-# Verify files in a local directory
-model-provenance verify ./path/to/my-model --local
-
-# Verify local directory, output JSON
-model-provenance verify ./my-model --local --format json
-```
-
-#### Generate a full provenance report
-
-```bash
-# Full provenance report for a Hub model (Rich table output)
-model-provenance report bert-base-uncased
-
-# Full provenance report as JSON
-model-provenance report gpt2 --format json
-
-# Full provenance report as YAML, saved to disk
-model-provenance report facebook/opt-125m --format yaml --output provenance.yaml
-```
-
-#### Manage the local known-good hash database
-
-```bash
-# Initialize / seed the database from the bundled YAML
+# Initialize the local hash database
 model-provenance db init
 
-# Add a known-good hash entry
-model-provenance db add bert-base-uncased config.json <sha256-hex>
+# Verify a Hugging Face Hub model
+model-provenance verify bert-base-uncased
 
-# List all stored entries
-model-provenance db list
+# Verify a local model directory
+model-provenance verify ./models/my-finetuned-model --local
 
-# Query a specific model
-model-provenance db query bert-base-uncased
+# Generate a full provenance report as JSON
+model-provenance report bert-base-uncased --format json
 ```
 
-## Output Format
+A passing audit exits with code `0`. A `WARN` or `FAIL` verdict exits with a non-zero code, making it easy to integrate into CI/CD pipelines.
 
-### Rich console table (default)
+---
+
+## Features
+
+- **Cryptographic fingerprinting** — Computes SHA-256 hashes for all model weight and config files and compares them against a local SQLite database seeded from a bundled YAML manifest of known-good hashes.
+- **Hugging Face Hub integration** — Audits remote models without downloading full weights by using the HF Hub API to fetch file listings and model card metadata.
+- **Supply chain attack scanner** — Detects pickle exploits, embedded shell scripts, unexpected ELF/PE executables, suspicious hardcoded URLs, and nested archive bombs inside model directories.
+- **License & compliance checker** — Parses model card license fields, flags restricted or non-commercial licenses (e.g. CC-BY-NC, proprietary), and emits notes for EU AI Act and NIST RMF relevance.
+- **Structured report output** — Renders results as Rich terminal tables, JSON, or YAML, with a clear `PASS` / `WARN` / `FAIL` verdict, per-file hash status, and actionable remediation guidance.
+
+---
+
+## Usage Examples
+
+### Verify a Hugging Face Hub model
+
+```bash
+model-provenance verify bert-base-uncased
+```
 
 ```
-╭─────────────────────────────────────────────────────────────────╮
-│          Model Provenance Report — bert-base-uncased            │
-╰─────────────────────────────────────────────────────────────────╯
+┌─────────────────────────────────────────────┐
+│  model-provenance audit: bert-base-uncased  │
+└─────────────────────────────────────────────┘
+ File                          Status     Hash Match
+ ─────────────────────────────────────────────────
+ config.json                   ✓ PASS     known-good
+ tokenizer_config.json         ✓ PASS     known-good
+ pytorch_model.bin             ✓ PASS     known-good
+ vocab.txt                     ✓ PASS     known-good
 
-Verdict: ✅ PASS
+ License : apache-2.0    ✓ No restrictions
+ Scanner : No suspicious findings
 
-┌──────────────────────────┬────────────┬───────────┬────────────┐
-│ File                     │ SHA-256    │ DB Status │ Scan       │
-├──────────────────────────┼────────────┼───────────┼────────────┤
-│ config.json              │ a7f4ab64…  │ ✅ match  │ ✅ clean   │
-│ tokenizer_config.json    │ b3c2d1e0…  │ ✅ match  │ ✅ clean   │
-│ vocab.txt                │ c4d3e2f1…  │ ✅ match  │ ✅ clean   │
-│ pytorch_model.bin        │ d5e4f3a2…  │ ✅ match  │ ✅ clean   │
-└──────────────────────────┴────────────┴───────────┴────────────┘
-
-License: apache-2.0  │  Compliance: ✅ No restrictions noted
+ Verdict: PASS
 ```
 
-### JSON output
+### Verify a local model directory
+
+```bash
+model-provenance verify ./models/my-model --local
+```
+
+### Generate a JSON provenance report
+
+```bash
+model-provenance report mistralai/Mistral-7B-v0.1 --format json --output report.json
+```
 
 ```json
 {
-  "model_id": "bert-base-uncased",
+  "model_id": "mistralai/Mistral-7B-v0.1",
   "revision": "main",
-  "verdict": "pass",
-  "timestamp": "2024-01-15T12:00:00Z",
+  "verdict": "WARN",
+  "fingerprint_coverage": 0.95,
   "files": [
-    {
-      "path": "config.json",
-      "sha256": "a7f4ab64e2a64c7f...",
-      "db_status": "match",
-      "scan_status": "clean",
-      "size_bytes": 512
-    }
+    { "path": "config.json", "status": "match", "sha256": "a3f9..." },
+    { "path": "model.safetensors", "status": "unknown", "sha256": "7c2b..." }
   ],
-  "license": {
-    "spdx_id": "apache-2.0",
-    "restricted": false,
-    "compliance_notes": []
-  },
   "scan_findings": [],
-  "remediation": []
+  "license": {
+    "identifier": "apache-2.0",
+    "restriction_level": "permissive",
+    "compliance_notes": []
+  }
 }
 ```
 
-### YAML output
+### Generate a YAML report
 
-```yaml
-model_id: bert-base-uncased
-revision: main
-verdict: pass
-timestamp: '2024-01-15T12:00:00Z'
-files:
-  - path: config.json
-    sha256: a7f4ab64e2a64c7f...
-    db_status: match
-    scan_status: clean
-    size_bytes: 512
-license:
-  spdx_id: apache-2.0
-  restricted: false
-  compliance_notes: []
-scan_findings: []
-remediation: []
+```bash
+model-provenance report ./models/my-model --local --format yaml
 ```
 
-## Verdicts
+### Manage the local hash database
 
-| Verdict | Meaning |
-|---------|----------------------------------------------------------|
-| `PASS`  | All hashes match, no suspicious files, no license issues |
-| `WARN`  | Minor issues: unknown hashes, non-OSI license, minor scan findings |
-| `FAIL`  | Hash mismatch detected, malicious patterns found, or critical license violation |
+```bash
+# Seed / reinitialize the database from the bundled YAML
+model-provenance db init
 
-## Supported Scan Detections
+# Add a known-good hash manually
+model-provenance db add --model-id owner/my-model --revision main \
+  --file-path pytorch_model.bin --sha256 <hex-digest>
 
-| Category | Detection |
-|----------|-----------|
-| Pickle exploit | Dangerous opcodes in `.pkl` / `.bin` files (e.g., `REDUCE` calling `os.system`) |
-| Embedded scripts | Shell scripts (`.sh`), Python scripts (`.py`) not expected in model repos |
-| Unexpected executables | ELF / PE binaries, `.so` / `.dll` files in suspicious locations |
-| Archive bombs | Deeply nested ZIP/tar archives |
-| Suspicious URLs | Hard-coded remote URLs in config files that may exfiltrate data |
+# List all audited models in the database
+model-provenance db list
 
-## License Compliance
+# Query hashes for a specific model
+model-provenance db query owner/my-model
 
-| License | Restriction Level | EU AI Act Note | NIST RMF Note |
-|---------|------------------|----------------|---------------|
-| Apache-2.0, MIT, BSD | ✅ Permissive | Low risk | Low risk |
-| CC-BY-SA-4.0 | ⚠️ ShareAlike | Review required | Document usage |
-| CC-BY-NC-4.0 | ⚠️ Non-commercial | Prohibited for commercial EU AI systems | Document restrictions |
-| Proprietary / custom | ❌ Restricted | Legal review required | High risk — document and assess |
-| RAIL, OpenRAIL | ⚠️ Conditional | Conditions may conflict with EU AI Act | Review use-case restrictions |
+# Remove a hash record
+model-provenance db remove --model-id owner/my-model --file-path pytorch_model.bin
+```
 
-## Known-Good Hash Database
+---
 
-`model-provenance` ships with a seed YAML database (`data/known_hashes.yaml`)
-containing known-good fingerprints for popular public models. At runtime these
-are loaded into a local SQLite database (`~/.model-provenance/hashes.db`).
+## Project Structure
 
-To contribute new known-good hashes:
+```
+model-provenance/
+├── pyproject.toml              # Project metadata, dependencies, CLI entry point
+├── README.md
+├── data/
+│   └── known_hashes.yaml       # Bundled seed database of known-good fingerprints
+├── model_provenance/
+│   ├── __init__.py             # Package init, version string
+│   ├── cli.py                  # Typer CLI: verify, report, db sub-commands
+│   ├── fingerprint.py          # SHA-256 hashing and manifest construction
+│   ├── checker.py              # Fingerprint comparison and tamper detection
+│   ├── fetcher.py              # HF Hub and local directory file listing
+│   ├── scanner.py              # Suspicious file pattern detection
+│   ├── license_check.py        # License parsing and compliance flagging
+│   ├── reporter.py             # Report assembly (Rich / JSON / YAML)
+│   └── db.py                   # SQLite fingerprint database management
+└── tests/
+    ├── test_fingerprint.py
+    ├── test_checker.py
+    ├── test_scanner.py
+    ├── test_license_check.py
+    ├── test_reporter.py
+    ├── test_db.py
+    └── test_fetcher.py
+```
 
-1. Run `model-provenance verify <model-id> --format yaml` on a trusted machine.
-2. Copy the file hashes into `data/known_hashes.yaml`.
-3. Open a pull request.
+---
+
+## Configuration
+
+`model-provenance` works out of the box with sensible defaults. The following options are available:
+
+| Option / Env Var | Default | Description |
+|---|---|---|
+| `--db-path` / `MODEL_PROVENANCE_DB` | `~/.model-provenance/hashes.db` | Path to the local SQLite fingerprint database |
+| `--format` | `rich` | Report output format: `rich`, `json`, or `yaml` |
+| `--output` | stdout | File path to write the report to |
+| `--revision` | `main` | Git revision (branch, tag, or commit SHA) for HF Hub models |
+| `--local` | `false` | Treat the model argument as a local directory path |
+| `--hf-token` / `HF_TOKEN` | *(none)* | Hugging Face API token for private model access |
+
+### Example: audit a private model with a custom DB path
+
+```bash
+export HF_TOKEN=hf_xxxx
+export MODEL_PROVENANCE_DB=/opt/audit/hashes.db
+
+model-provenance report my-org/private-model --format yaml --output audit.yaml
+```
+
+---
 
 ## Development
 
 ```bash
 # Clone and install in editable mode with dev dependencies
-git clone https://github.com/example/model-provenance
+git clone https://github.com/your-org/model-provenance
 cd model-provenance
 pip install -e ".[dev]"
 
 # Run tests
 pytest
 
-# Run a specific test module
-pytest tests/test_fingerprint.py -v
+# Run tests with async support
+pytest --asyncio-mode=auto
 ```
 
-## Architecture
-
-```
-model_provenance/
-├── __init__.py      # Version string
-├── cli.py           # Typer CLI (verify, report, db commands)
-├── fingerprint.py   # SHA-256 hashing & manifest construction
-├── fetcher.py       # HF Hub file listing + local directory scan
-├── checker.py       # Hash comparison against DB
-├── scanner.py       # Suspicious file pattern detection
-├── license_check.py # License parsing & compliance flags
-├── reporter.py      # Report assembly & rendering (Rich/JSON/YAML)
-└── db.py            # SQLite known-good hash database
-data/
-└── known_hashes.yaml  # Bundled seed fingerprint database
-```
+---
 
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
+
+---
+
+*Built with [Jitter](https://github.com/jitter-ai) - an AI agent that ships code daily.*
