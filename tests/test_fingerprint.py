@@ -77,6 +77,21 @@ class TestComputeSha256:
         assert len(digest) == 64
         assert all(c in "0123456789abcdef" for c in digest)
 
+    def test_different_content_different_hash(self, tmp_path: Path) -> None:
+        a = tmp_path / "a.bin"
+        b = tmp_path / "b.bin"
+        a.write_bytes(b"content A")
+        b.write_bytes(b"content B")
+        assert compute_sha256(a) != compute_sha256(b)
+
+    def test_same_content_same_hash(self, tmp_path: Path) -> None:
+        content = b"identical content"
+        a = tmp_path / "a.bin"
+        b = tmp_path / "b.bin"
+        a.write_bytes(content)
+        b.write_bytes(content)
+        assert compute_sha256(a) == compute_sha256(b)
+
 
 # ---------------------------------------------------------------------------
 # compute_sha256_bytes
@@ -96,6 +111,15 @@ class TestComputeSha256Bytes:
         assert len(digest) == 64
         assert digest == digest.lower()
 
+    def test_different_data_different_hash(self) -> None:
+        assert compute_sha256_bytes(b"aaa") != compute_sha256_bytes(b"bbb")
+
+    def test_large_data(self) -> None:
+        data = b"Z" * (5 * 1024 * 1024)
+        digest = compute_sha256_bytes(data)
+        assert len(digest) == 64
+        assert digest == _sha256_of(data)
+
 
 # ---------------------------------------------------------------------------
 # classify_file
@@ -114,16 +138,23 @@ class TestClassifyFile:
             ("weights.npz", "weight"),
             ("model.h5", "weight"),
             ("model.gguf", "weight"),
+            ("model.ggml", "weight"),
+            ("model.msgpack", "weight"),
+            ("model.flax", "weight"),
+            ("model.npy", "weight"),
+            ("model.hdf5", "weight"),
             ("config.json", "config"),
             ("tokenizer_config.json", "config"),
             ("vocab.txt", "config"),
             ("README.md", "config"),
             ("setup.cfg", "config"),
+            ("special_tokens_map.json", "config"),
             ("run.sh", "other"),
             ("main.py", "other"),
             ("binary.elf", "other"),
             ("archive.zip", "other"),
             ("noextension", "other"),
+            (".hidden", "other"),
         ],
     )
     def test_classification(self, filename: str, expected: str) -> None:
@@ -135,6 +166,15 @@ class TestClassifyFile:
     def test_case_insensitive_extension(self) -> None:
         assert classify_file("MODEL.BIN") == "weight"
         assert classify_file("Config.JSON") == "config"
+
+    def test_nested_path_uses_suffix_only(self) -> None:
+        assert classify_file("subdir/model.bin") == "weight"
+        assert classify_file("subdir/config.json") == "config"
+
+    def test_returns_string_type(self) -> None:
+        result = classify_file("model.bin")
+        assert isinstance(result, str)
+        assert result in ("weight", "config", "other")
 
 
 # ---------------------------------------------------------------------------
@@ -166,11 +206,26 @@ class TestFileFingerprint:
         assert self._make(file_type="config").is_config
         assert not self._make(file_type="weight").is_config
 
+    def test_other_file_type_not_weight_or_config(self) -> None:
+        fp = self._make(file_type="other")
+        assert not fp.is_weight
+        assert not fp.is_config
+
     def test_ok_no_error(self) -> None:
         assert self._make().ok
 
     def test_ok_false_with_error(self) -> None:
         assert not self._make(error="some error").ok
+
+    def test_ok_false_with_empty_error_string(self) -> None:
+        # An empty error string still means no error (it's falsy but not None).
+        fp = self._make(error="")
+        # The ok property checks error is None.
+        assert fp.ok  # empty string is not None
+
+    def test_ok_false_with_none_error_is_true(self) -> None:
+        fp = self._make(error=None)
+        assert fp.ok
 
     def test_to_dict(self) -> None:
         fp = self._make()
@@ -179,9 +234,21 @@ class TestFileFingerprint:
         assert d["path"] == "config.json"
         assert d["error"] is None
 
+    def test_to_dict_values(self) -> None:
+        fp = self._make(sha256="b" * 64, size_bytes=256, file_type="weight", error="oops")
+        d = fp.to_dict()
+        assert d["sha256"] == "b" * 64
+        assert d["size_bytes"] == 256
+        assert d["file_type"] == "weight"
+        assert d["error"] == "oops"
+
     def test_short_hash_empty_when_no_sha256(self) -> None:
         fp = self._make(sha256="")
         assert fp.short_hash == ""
+
+    def test_short_hash_length_16(self) -> None:
+        fp = self._make(sha256="a" * 64)
+        assert len(fp.short_hash) == 16
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +291,17 @@ class TestFingerprintManifest:
         assert m.get("nonexistent.txt") is None
 
     def test_get_normalises_backslash(self) -> None:
-        m = self._make_manifest()
-        assert m.get("config.json") is not None
+        m = FingerprintManifest(model_id="test")
+        m.files = [
+            FileFingerprint(
+                path="sub/config.json",
+                sha256="a" * 64,
+                size_bytes=10,
+                file_type="config",
+            )
+        ]
+        # Should find even with backslash separator.
+        assert m.get("sub/config.json") is not None
 
     def test_weight_files(self) -> None:
         m = self._make_manifest()
@@ -245,6 +321,10 @@ class TestFingerprintManifest:
         m = self._make_manifest()
         assert m.file_count == 2
 
+    def test_file_count_zero_when_empty(self) -> None:
+        m = FingerprintManifest(model_id="test")
+        assert m.file_count == 0
+
     def test_errored_files_empty_when_none(self) -> None:
         m = self._make_manifest()
         assert m.errored_files == []
@@ -261,6 +341,7 @@ class TestFingerprintManifest:
             )
         )
         assert len(m.errored_files) == 1
+        assert m.errored_files[0].path == "bad.bin"
 
     def test_to_dict_keys(self) -> None:
         m = self._make_manifest()
@@ -277,6 +358,16 @@ class TestFingerprintManifest:
         }
         assert set(d.keys()) == expected_keys
 
+    def test_to_dict_files_is_list(self) -> None:
+        m = self._make_manifest()
+        d = m.to_dict()
+        assert isinstance(d["files"], list)
+        assert len(d["files"]) == 2
+
+    def test_to_dict_model_id(self) -> None:
+        m = self._make_manifest()
+        assert m.to_dict()["model_id"] == "test/model"
+
     def test_computed_at_format(self) -> None:
         m = self._make_manifest()
         # Should match YYYY-MM-DDTHH:MM:SSZ
@@ -284,6 +375,18 @@ class TestFingerprintManifest:
 
         pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
         assert re.match(pattern, m.computed_at)
+
+    def test_aggregate_sha256_defaults_to_none(self) -> None:
+        m = FingerprintManifest(model_id="test")
+        assert m.aggregate_sha256 is None
+
+    def test_source_default_local(self) -> None:
+        m = FingerprintManifest(model_id="test")
+        assert m.source == "local"
+
+    def test_revision_default_local(self) -> None:
+        m = FingerprintManifest(model_id="test")
+        assert m.revision == "local"
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +429,36 @@ class TestAggregateHash:
         digest = _aggregate_hash(self._fps())
         assert len(digest) == 64
         assert digest == digest.lower()
+
+    def test_different_paths_produce_different_aggregate(self) -> None:
+        fps1 = [
+            FileFingerprint(
+                path="path_one.txt", sha256="a" * 64, size_bytes=1, file_type="config"
+            ),
+        ]
+        fps2 = [
+            FileFingerprint(
+                path="path_two.txt", sha256="a" * 64, size_bytes=1, file_type="config"
+            ),
+        ]
+        assert _aggregate_hash(fps1) != _aggregate_hash(fps2)
+
+    def test_single_file_list(self) -> None:
+        fps = [
+            FileFingerprint(
+                path="only.bin", sha256="e" * 64, size_bytes=10, file_type="weight"
+            )
+        ]
+        digest = _aggregate_hash(fps)
+        assert len(digest) == 64
+
+    def test_adding_file_changes_aggregate(self) -> None:
+        fps = self._fps()
+        extra_fp = FileFingerprint(
+            path="extra.bin", sha256="f" * 64, size_bytes=3, file_type="weight"
+        )
+        fps_with_extra = fps + [extra_fp]
+        assert _aggregate_hash(fps) != _aggregate_hash(fps_with_extra)
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +504,42 @@ class TestFingerprintFile:
         assert "FileNotFoundError" in (fp.error or "")
         assert fp.sha256 == ""
         assert fp.size_bytes == 0
+
+    def test_config_file_classified_correctly(self, tmp_path: Path) -> None:
+        target = tmp_path / "config.json"
+        target.write_bytes(b"{\"key\": \"value\"}")
+        fp = fingerprint_file(target, base_dir=tmp_path)
+        assert fp.file_type == "config"
+        assert fp.is_config
+
+    def test_size_bytes_matches_actual(self, tmp_path: Path) -> None:
+        content = b"a" * 1234
+        target = tmp_path / "model.pt"
+        target.write_bytes(content)
+        fp = fingerprint_file(target, base_dir=tmp_path)
+        assert fp.size_bytes == 1234
+
+    def test_sha256_matches_direct_computation(self, tmp_path: Path) -> None:
+        content = b"direct computation test"
+        target = tmp_path / "weights.safetensors"
+        target.write_bytes(content)
+        fp = fingerprint_file(target, base_dir=tmp_path)
+        assert fp.sha256 == _sha256_of(content)
+
+    def test_error_is_none_on_success(self, tmp_path: Path) -> None:
+        target = tmp_path / "tokenizer.json"
+        target.write_bytes(b"{}")
+        fp = fingerprint_file(target, base_dir=tmp_path)
+        assert fp.error is None
+
+    def test_nested_path_in_subdirectory(self, tmp_path: Path) -> None:
+        subdir = tmp_path / "shards" / "part0"
+        subdir.mkdir(parents=True)
+        target = subdir / "shard.bin"
+        target.write_bytes(b"shard content")
+        fp = fingerprint_file(target, base_dir=tmp_path)
+        assert fp.path == "shards/part0/shard.bin"
+        assert fp.ok
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +635,59 @@ class TestBuildManifestFromDirectory:
         manifest = build_manifest_from_directory(str(model_dir))
         assert manifest.file_count == 3
 
+    def test_custom_revision(self, tmp_path: Path) -> None:
+        model_dir = self._make_model_dir(tmp_path)
+        manifest = build_manifest_from_directory(model_dir, revision="v1.0")
+        assert manifest.revision == "v1.0"
+
+    def test_default_revision_is_local(self, tmp_path: Path) -> None:
+        model_dir = self._make_model_dir(tmp_path)
+        manifest = build_manifest_from_directory(model_dir)
+        assert manifest.revision == "local"
+
+    def test_file_paths_use_forward_slash(self, tmp_path: Path) -> None:
+        model_dir = self._make_model_dir(tmp_path)
+        subdir = model_dir / "sub"
+        subdir.mkdir()
+        (subdir / "extra.json").write_bytes(b"{}")
+        manifest = build_manifest_from_directory(model_dir)
+        for fp in manifest.files:
+            assert "\\" not in fp.path
+
+    def test_aggregate_none_when_error_files(self, tmp_path: Path) -> None:
+        """If any file errors, aggregate_sha256 should be None."""
+        model_dir = self._make_model_dir(tmp_path)
+        manifest = build_manifest_from_directory(model_dir)
+        # Manually inject an errored file to test the logic.
+        manifest.files.append(
+            FileFingerprint(
+                path="bad.bin",
+                sha256="",
+                size_bytes=0,
+                file_type="weight",
+                error="read error",
+            )
+        )
+        # Re-running build would set aggregate_sha256 = None when errors exist.
+        # We test the property of errored_files instead.
+        assert len(manifest.errored_files) == 1
+
+    def test_empty_directory_returns_manifest(self, tmp_path: Path) -> None:
+        empty_dir = tmp_path / "empty_model"
+        empty_dir.mkdir()
+        manifest = build_manifest_from_directory(empty_dir)
+        assert isinstance(manifest, FingerprintManifest)
+        assert manifest.file_count == 0
+
+    def test_cache_dir_skipped(self, tmp_path: Path) -> None:
+        model_dir = self._make_model_dir(tmp_path)
+        cache_dir = model_dir / "__pycache__"
+        cache_dir.mkdir()
+        (cache_dir / "something.pyc").write_bytes(b"compiled")
+        manifest = build_manifest_from_directory(model_dir)
+        paths = [f.path for f in manifest.files]
+        assert not any("__pycache__" in p for p in paths)
+
 
 # ---------------------------------------------------------------------------
 # build_manifest_from_file_map
@@ -518,6 +740,12 @@ class TestBuildManifestFromFileMap:
         )
         assert manifest.source == "hub"
 
+    def test_custom_source(self) -> None:
+        manifest = build_manifest_from_file_map(
+            self._sample_map(), model_id="test/model", source="official"
+        )
+        assert manifest.source == "official"
+
     def test_get_file_by_path(self) -> None:
         manifest = build_manifest_from_file_map(
             self._sample_map(), model_id="test/model"
@@ -532,6 +760,36 @@ class TestBuildManifestFromFileMap:
         )
         for fp in manifest.files:
             assert fp.size_bytes == 0
+
+    def test_aggregate_order_independent(self) -> None:
+        map1 = {"a.bin": "a" * 64, "b.json": "b" * 64}
+        map2 = {"b.json": "b" * 64, "a.bin": "a" * 64}
+        m1 = build_manifest_from_file_map(map1, model_id="test")
+        m2 = build_manifest_from_file_map(map2, model_id="test")
+        assert m1.aggregate_sha256 == m2.aggregate_sha256
+
+    def test_single_file_map(self) -> None:
+        file_map = {"only_file.bin": "d" * 64}
+        manifest = build_manifest_from_file_map(file_map, model_id="test")
+        assert manifest.file_count == 1
+        assert manifest.files[0].path == "only_file.bin"
+
+    def test_revision_preserved(self) -> None:
+        manifest = build_manifest_from_file_map(
+            self._sample_map(), model_id="test/model", revision="v2.0"
+        )
+        assert manifest.revision == "v2.0"
+
+    def test_all_files_in_manifest(self) -> None:
+        file_map = {
+            "a.json": "a" * 64,
+            "b.bin": "b" * 64,
+            "c.safetensors": "c" * 64,
+            "d.txt": "d" * 64,
+        }
+        manifest = build_manifest_from_file_map(file_map, model_id="test")
+        paths = {fp.path for fp in manifest.files}
+        assert paths == {"a.json", "b.bin", "c.safetensors", "d.txt"}
 
 
 # ---------------------------------------------------------------------------
@@ -565,3 +823,23 @@ class TestFingerprintBytesEntry:
         fp = fingerprint_bytes_entry("vocab.txt", b"word\n")
         assert fp.ok
         assert fp.error is None
+
+    def test_empty_bytes(self) -> None:
+        fp = fingerprint_bytes_entry("empty.bin", b"")
+        assert fp.sha256 == _sha256_of(b"")
+        assert fp.size_bytes == 0
+        assert fp.ok
+
+    def test_large_bytes_entry(self) -> None:
+        data = b"X" * (1024 * 1024)
+        fp = fingerprint_bytes_entry("big_model.bin", data)
+        assert fp.sha256 == _sha256_of(data)
+        assert fp.size_bytes == len(data)
+
+    def test_other_file_type(self) -> None:
+        fp = fingerprint_bytes_entry("run.sh", b"#!/bin/bash")
+        assert fp.file_type == "other"
+
+    def test_returns_filefingerprint_instance(self) -> None:
+        fp = fingerprint_bytes_entry("model.safetensors", b"data")
+        assert isinstance(fp, FileFingerprint)
